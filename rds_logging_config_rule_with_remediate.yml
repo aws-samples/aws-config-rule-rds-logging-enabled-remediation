@@ -1,0 +1,452 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create AWS Config rules to scan RDS instances, with an Automation remediation document to enable log export to cloudwatch.
+Parameters:
+  DocumentName:
+    Description: Name of the Automation remediation document. Must not begin with reserved prefixes such as aws, amazon, or amzn.    
+    Type: String
+    Default: RDS-Logging-ConfigRemediate
+  RDSlogConfigRuleName:
+    Type: String
+    Default: rds-logging-enabled
+    Description: The name that you assign to the AWS Config rule to scan RDS for logging.
+  AssumeRolePolicyname:
+    Type: String
+    Default: RDS-Config-Remediate-policy
+    Description: Policy name to be created which will be attached to assume role in config remediation.
+Resources:
+  RemediationDocument: 
+    Type: "AWS::SSM::Document"
+    Properties:
+      DocumentType: Automation
+      Name: !Ref "DocumentName"
+      Content:
+        schemaVersion: "0.3"
+        description: |
+          ### Document Name - RDS-Logging-ConfigRemediate
+
+          ## What does this document do?
+          This document is used to enable log export to cloudwatch using the input parameter DB Instance resourceId.
+
+          ## Input Parameters
+          * ResourceId: (Required) Resource ID of the RDS DB Instance.
+          * AutomationAssumeRole: (Required) The ARN of the role that allows Automation to perform the actions on your behalf.
+
+          ## Output Parameters
+          * EnableLogExportMySQL.DbInstance - The standard HTTP response from the ModifyDBInstance API.
+          * EnableLogExportPostgres.DbInstance - The standard HTTP response from the ModifyDBInstance API.  
+          * EnableLogExportMaria.DbInstance - The standard HTTP response from the ModifyDBInstance API.
+          * EnableLogExportOracle.DbInstance - The standard HTTP response from the ModifyDBInstance API. 
+          * EnableLogExportSqlserver.DbInstance - The standard HTTP response from the ModifyDBInstance API. 
+          * EnableLogExportDB2.DbInstance - The standard HTTP response from the ModifyDBInstance API.                                    
+
+        assumeRole: "{{ AutomationAssumeRole }}"
+        parameters:
+          AutomationAssumeRole:
+            type: AWS::IAM::Role::Arn
+            description: (Required) The ARN of the role that allows Automation to perform the actions on your behalf.
+          ResourceId:
+            type: String
+            description: (Required) Resource ID of the Amazon RDS instance for which Enhanced Monitoring needs to be enabled.
+            allowedPattern: "db-[A-Z0-9]{26}"
+        outputs:
+          - EnableLogExportMySQL.DbInstance
+          - EnableLogExportPostgres.DbInstance
+          - EnableLogExportMaria.DbInstance  
+          - EnableLogExportOracle.DbInstance 
+          - EnableLogExportSqlserver.DbInstance 
+          - EnableLogExportDB2.DbInstance                               
+        mainSteps:
+          -
+            name: DescribeDBInstances
+            action: "aws:executeAwsApi"
+            description: |
+              ## DescribeDBInstances
+                Makes describeDBInstances API call using RDS Instance DbiResourceId to get DBInstanceId.
+              ## Outputs
+              * DbInstanceIdentifier: DBInstance Identifier of the RDS Instance.
+            timeoutSeconds: 600
+            isEnd: false
+            inputs:
+              Service: rds
+              Api: DescribeDBInstances
+              Filters:
+                - Name: "dbi-resource-id"
+                  Values:
+                    - "{{ ResourceId }}"  
+            outputs:
+              - Name: DBInstanceIdentifier 
+                Selector: $.DBInstances[0].DBInstanceIdentifier
+                Type: String
+              - Name: DBInstanceEngine 
+                Selector: $.DBInstances[0].Engine
+                Type: String        
+          -
+            name: VerifyDBInstanceStatus
+            action: "aws:waitForAwsResourceProperty"
+            timeoutSeconds: 900
+            isEnd: false
+            description: |
+              ## VerifyDBInstanceStatus
+              Waits and verifies whether AWS RDS DBInstance status is available before enabling log export.
+            inputs:
+              Service: rds
+              Api: DescribeDBInstances
+              DBInstanceIdentifier: "{{ DescribeDBInstances.DBInstanceIdentifier }}"
+              PropertySelector: "$.DBInstances[0].DBInstanceStatus"
+              DesiredValues:
+                - "available"
+                
+          - 
+            name: DbInstanceEngineCheck
+            description: |
+              ## DbInstanceEngineCheck
+              Checks the engine of RDS instance.
+            action: aws:branch
+            inputs:
+              Choices:
+                - NextStep: EnableLogExportMySQL
+                  Variable: "{{ DescribeDBInstances.DBInstanceEngine }}"
+                  StartsWith: "mysql"
+                - NextStep: EnableLogExportPostgres
+                  Variable: "{{ DescribeDBInstances.DBInstanceEngine }}"
+                  StartsWith: "postgres"
+                - NextStep: EnableLogExportMaria
+                  Variable: "{{ DescribeDBInstances.DBInstanceEngine }}"
+                  StartsWith: "mariadb"
+                - NextStep: EnableLogExportOracle
+                  Variable: "{{ DescribeDBInstances.DBInstanceEngine }}"
+                  StartsWith: "oracle"
+                - NextStep: EnableLogExportSqlserver
+                  Variable: "{{ DescribeDBInstances.DBInstanceEngine }}"
+                  StartsWith: "sqlserver"
+                - NextStep: EnableLogExportDB2
+                  Variable: "{{ DescribeDBInstances.DBInstanceEngine }}"
+                  StartsWith: "db2"                                                                           
+            isEnd: true
+
+          -
+            name: EnableLogExportMySQL
+            action: "aws:executeAwsApi"
+            description: |
+              ## EnableLogExportMySQL
+                Makes ModifyDBInstance API call to enable log export to cloudwatch on the RDS Instance
+                using the DBInstanceId from the previous action.
+              ## Outputs
+                * DbInstance: The standard HTTP response from the ModifyDBInstance API.
+            timeoutSeconds: 600
+            isEnd: false
+            nextStep: PostVerifyDBInstanceStatus
+            inputs:
+              Service: rds
+              Api: ModifyDBInstance
+              ApplyImmediately: True
+              DBInstanceIdentifier: "{{ DescribeDBInstances.DBInstanceIdentifier }}"
+              CloudwatchLogsExportConfiguration: {'EnableLogTypes': ['audit','error','general','slowquery']}
+            outputs:
+              - Name: DbInstance
+                Selector: $
+                Type: StringMap
+
+          -
+            name: EnableLogExportPostgres
+            action: "aws:executeAwsApi"
+            description: |
+              ## EnableLogExportPostgres
+                Makes ModifyDBInstance API call to enable log export to cloudwatch  on the RDS Instance
+                using the DBInstanceId from the previous action.
+              ## Outputs
+                * DbInstance: The standard HTTP response from the ModifyDBInstance API.
+            timeoutSeconds: 600
+            isEnd: false
+            nextStep: PostVerifyDBInstanceStatus
+            inputs:
+              Service: rds
+              Api: ModifyDBInstance
+              ApplyImmediately: True
+              DBInstanceIdentifier: "{{ DescribeDBInstances.DBInstanceIdentifier }}"
+              CloudwatchLogsExportConfiguration: {'EnableLogTypes': ['postgresql','upgrade']}
+            outputs:
+              - Name: DbInstance
+                Selector: $
+                Type: StringMap
+
+          -
+            name: EnableLogExportMaria
+            action: "aws:executeAwsApi"
+            description: |
+              ## EnableLogExportMaria
+                Makes ModifyDBInstance API call to enable log export to cloudwatch on the RDS Instance
+                using the DBInstanceId from the previous action.
+              ## Outputs
+                * DbInstance: The standard HTTP response from the ModifyDBInstance API.
+            timeoutSeconds: 600
+            isEnd: false
+            nextStep: PostVerifyDBInstanceStatus
+            inputs:
+              Service: rds
+              Api: ModifyDBInstance
+              ApplyImmediately: True
+              DBInstanceIdentifier: "{{ DescribeDBInstances.DBInstanceIdentifier }}"
+              CloudwatchLogsExportConfiguration: {'EnableLogTypes': ['audit','error','general','slowquery']}
+            outputs:
+              - Name: DbInstance
+                Selector: $
+                Type: StringMap
+
+          -
+            name: EnableLogExportOracle
+            action: "aws:executeAwsApi"
+            description: |
+              ## EnableLogExportOracle
+                Makes ModifyDBInstance API call to enable log export to cloudwatch on the RDS Instance
+                using the DBInstanceId from the previous action.
+              ## Outputs
+                * DbInstance: The standard HTTP response from the ModifyDBInstance API.
+            timeoutSeconds: 600
+            isEnd: false
+            nextStep: PostVerifyDBInstanceStatus
+            inputs:
+              Service: rds
+              Api: ModifyDBInstance
+              ApplyImmediately: True
+              DBInstanceIdentifier: "{{ DescribeDBInstances.DBInstanceIdentifier }}"
+              CloudwatchLogsExportConfiguration: {'EnableLogTypes': ['alert','audit','listener','oemagent','trace']}
+            outputs:
+              - Name: DbInstance
+                Selector: $
+                Type: StringMap
+
+          -
+            name: EnableLogExportSqlserver
+            action: "aws:executeAwsApi"
+            description: |
+              ## EnableLogExportSqlserver
+                Makes ModifyDBInstance API call to enable log export to cloudwatch on the RDS Instance
+                using the DBInstanceId from the previous action.
+              ## Outputs
+                * DbInstance: The standard HTTP response from the ModifyDBInstance API.
+            timeoutSeconds: 600
+            isEnd: false
+            nextStep: PostVerifyDBInstanceStatus
+            inputs:
+              Service: rds
+              Api: ModifyDBInstance
+              ApplyImmediately: True
+              DBInstanceIdentifier: "{{ DescribeDBInstances.DBInstanceIdentifier }}"
+              CloudwatchLogsExportConfiguration: {'EnableLogTypes': ['agent','error']}
+            outputs:
+              - Name: DbInstance
+                Selector: $
+                Type: StringMap
+
+          -
+            name: EnableLogExportDB2
+            action: "aws:executeAwsApi"
+            description: |
+              ## EnableLogExportDB2
+                Makes ModifyDBInstance API call to enable log export to cloudwatch on the RDS Instance
+                using the DBInstanceId from the previous action.
+              ## Outputs
+                * DbInstance: The standard HTTP response from the ModifyDBInstance API.
+            timeoutSeconds: 600
+            isEnd: false
+            nextStep: PostVerifyDBInstanceStatus
+            inputs:
+              Service: rds
+              Api: ModifyDBInstance
+              ApplyImmediately: True
+              DBInstanceIdentifier: "{{ DescribeDBInstances.DBInstanceIdentifier }}"
+              CloudwatchLogsExportConfiguration: {'EnableLogTypes': ['diag.log','notify.log']}
+            outputs:
+              - Name: DbInstance
+                Selector: $
+                Type: StringMap
+          -
+            name: PostVerifyDBInstanceStatus
+            action: "aws:waitForAwsResourceProperty"
+            timeoutSeconds: 900
+            isEnd: false
+            nextStep: VerifyLogExpEnabled
+            description: |
+              ## PostVerifyDBInstanceStatus
+              Waits and verifies whether AWS RDS DBInstance status is configuring-log-exports before verifying log export.
+            inputs:
+              Service: rds
+              Api: DescribeDBInstances
+              DBInstanceIdentifier: "{{ DescribeDBInstances.DBInstanceIdentifier }}"
+              PropertySelector: "$.DBInstances[0].DBInstanceStatus"
+              DesiredValues:
+                - "configuring-log-exports"
+
+          -
+            name: VerifyLogExpEnabled
+            action: "aws:executeScript"
+            description: |
+              ## VerifyLogExpEnabled
+              Checks that the log export is enabled on RDS Instance.
+              ## Outputs
+              * Output: The standard HTTP response from the DescribeDBInstances API.
+            isEnd: true
+            timeoutSeconds: 600
+            inputs:
+              Runtime: python3.8
+              Handler: handler
+              InputPayload:
+                DBIdentifier: "{{ DescribeDBInstances.DBInstanceIdentifier }}" 
+              Script: |-
+                import boto3
+                import time
+
+                def handler(event, context):
+                    rds_client = boto3.client("rds")
+                    db_instance_id = event["DBIdentifier"]
+
+                    try:
+                        rds_waiter = rds_client.get_waiter("db_instance_available")
+                        rds_waiter.wait(DBInstanceIdentifier=db_instance_id)
+
+                        db_instances = rds_client.describe_db_instances(
+                            DBInstanceIdentifier=db_instance_id)
+
+                        for db_instance in db_instances.get("DBInstances", [{}]):
+                            LogsEnabled = db_instance.get("EnabledCloudwatchLogsExports")
+                            dbEngine = db_instance.get("Engine")
+
+                        mysqlloglist = ['audit', 'error', 'general', 'slowquery']
+                        postgreloglist = ['postgresql', 'upgrade']
+                        marialoglist = ['audit', 'error', 'general', 'slowquery']
+                        oracleloglist = ['alert', 'audit', 'listener', 'oemagent','trace']
+                        sqlserverloglist = ['agent', 'error']
+                        db2loglist = ['diag.log', 'notify.log']                                                                        
+
+                        if dbEngine.startswith("mysql"):
+                          if LogsEnabled == mysqlloglist:
+                              print ("Verified mysql engine logs are exported")
+                              return {
+                                        "output": db_instances["ResponseMetadata"]
+                                      }
+                          else:
+                              info = "VERIFICATION FAILED. RDS INSTANCE LOG EXPORT {} IS NOT ENABLED WITH THE REQUIRED VALUE {}".format(
+                                      LogsEnabled, mysqlloglist)
+                              raise Exception(info)
+
+                        if dbEngine.startswith("postgres"):
+                          if LogsEnabled == postgreloglist:
+                              print ("Verified postgres engine logs are exported")                          
+                              return {
+                                        "output": db_instances["ResponseMetadata"]
+                                      }
+                          else:
+                              info = "VERIFICATION FAILED. RDS INSTANCE LOG EXPORT {} IS NOT ENABLED WITH THE REQUIRED VALUE {}".format(
+                                      LogsEnabled, postgreloglist)
+                              raise Exception(info)     
+
+                        if dbEngine.startswith("mariadb"):
+                          if LogsEnabled == marialoglist:
+                              print ("Verified mariadb engine logs are exported")                          
+                              return {
+                                        "output": db_instances["ResponseMetadata"]
+                                      }
+                          else:
+                              info = "VERIFICATION FAILED. RDS INSTANCE LOG EXPORT {} IS NOT ENABLED WITH THE REQUIRED VALUE {}".format(
+                                      LogsEnabled, marialoglist)
+                              raise Exception(info)
+
+                        if dbEngine.startswith("oracle"):
+                          if LogsEnabled == oracleloglist:
+                              print ("Verified oracle engine logs are exported")                          
+                              return {
+                                        "output": db_instances["ResponseMetadata"]
+                                      }
+                          else:
+                              info = "VERIFICATION FAILED. RDS INSTANCE LOG EXPORT {} IS NOT ENABLED WITH THE REQUIRED VALUE {}".format(
+                                      LogsEnabled, oracleloglist)
+                              raise Exception(info)
+
+                        if dbEngine.startswith("sqlserver"):
+                          if LogsEnabled == sqlserverloglist:
+                              print ("Verified sqlserver engine logs are exported")                          
+                              return {
+                                        "output": db_instances["ResponseMetadata"]
+                                      }
+                          else:
+                              info = "VERIFICATION FAILED. RDS INSTANCE LOG EXPORT {} IS NOT ENABLED WITH THE REQUIRED VALUE {}".format(
+                                      LogsEnabled, sqlserverloglist)
+                              raise Exception(info)
+
+                        if dbEngine.startswith("db2"):
+                          if LogsEnabled == db2loglist:
+                              print ("Verified db2 engine logs are exported")                          
+                              return {
+                                        "output": db_instances["ResponseMetadata"]
+                                      }
+                          else:
+                              info = "VERIFICATION FAILED. RDS INSTANCE LOG EXPORT {} IS NOT ENABLED WITH THE REQUIRED VALUE {}".format(
+                                      LogsEnabled, db2loglist)
+                              raise Exception(info)                                                            
+                    except Exception as e:
+                        raise e
+            outputs:
+              - Name: Output
+                Selector: $.Payload.output
+                Type: StringMap
+
+  AWSConfigRuleRDSlog:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: !Ref RDSlogConfigRuleName
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::RDS::DBInstance
+      Source:
+        Owner: AWS
+        SourceIdentifier: RDS_LOGGING_ENABLED
+
+  ConfigRemediationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - 'ssm.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: !Ref AssumeRolePolicyname
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action: 
+                - ssm:GetAutomationExecution
+                - ssm:StartAutomationExecution
+                - rds:DescribeDBInstances
+                - rds:ModifyDBInstance
+              Resource:
+                - arn:aws:ssm:*:*:automation-definition/*:*
+                - arn:aws:ssm:*:*:automation-execution/*
+                - arn:aws:rds:*:*:db:*
+
+  AWSConfigRemediationConfig:
+    Type: "AWS::Config::RemediationConfiguration"
+    DependsOn: ConfigRemediationRole
+    Properties:
+      ConfigRuleName:
+        Ref: AWSConfigRuleRDSlog
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values: 
+            - Fn::GetAtt: [ ConfigRemediationRole, Arn ]
+        ResourceId:
+          ResourceValue:
+            Value: RESOURCE_ID
+      TargetId: !Ref RemediationDocument
+      TargetType: "SSM_DOCUMENT"
+      Automatic: True
+      MaximumAutomaticAttempts: 1
+      RetryAttemptSeconds: 60
